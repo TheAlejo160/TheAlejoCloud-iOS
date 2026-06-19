@@ -1,6 +1,35 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+#if os(macOS)
+import AppKit
+typealias PlatformImage = NSImage
+#else
+import UIKit
+typealias PlatformImage = UIImage
+#endif
+
+// MARK: - Modificadores Exclusivos de iOS (Compatibilidad Mac)
+extension View {
+    @ViewBuilder
+    func iosKeyboardURL() -> some View {
+        #if os(iOS)
+        self.keyboardType(.URL).textInputAutocapitalization(.never)
+        #else
+        self
+        #endif
+    }
+    
+    @ViewBuilder
+    func iosDisableAutocap() -> some View {
+        #if os(iOS)
+        self.textInputAutocapitalization(.never)
+        #else
+        self
+        #endif
+    }
+}
+
 // MARK: - Wrapper para exportar archivos nativamente
 struct DownloadedFile: FileDocument {
     static var readableContentTypes: [UTType] { [.data, .zip, .archive] }
@@ -105,11 +134,19 @@ struct ContentView: View {
                 .animation(.easeInOut(duration: 0.6), value: isCurrentlyDark)
             
             if isLoggedIn {
+                #if os(iOS)
                 NavigationView {
                     NubeView(token: authToken, initialPath: "/", baseURL: urlBaseActiva, isDark: isCurrentlyDark, alCerrarSesion: alCerrarSesion)
                 }
                 .navigationViewStyle(.stack)
                 .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.98)), removal: .opacity))
+                #else
+                // En macOS, usamos NavigationStack para evitar la tercera columna inútil (Tríptico)
+                NavigationStack {
+                    NubeView(token: authToken, initialPath: "/", baseURL: urlBaseActiva, isDark: isCurrentlyDark, alCerrarSesion: alCerrarSesion)
+                }
+                .transition(.opacity)
+                #endif
             } else {
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 25) {
@@ -140,6 +177,7 @@ struct ContentView: View {
                                             .foregroundColor(isCurrentlyDark ? .white : .black)
                                     }
                                 }
+                                .buttonStyle(.plain)
                                 
                                 Spacer()
                                 
@@ -172,12 +210,10 @@ struct ContentView: View {
                                 VStack(alignment: .leading, spacing: 10) {
                                     TextField("http://...", text: $urlLocal)
                                         .textFieldStyle(.roundedBorder)
-                                        .keyboardType(.URL)
-                                        .textInputAutocapitalization(.never)
+                                        .iosKeyboardURL()
                                     TextField("https://...", text: $urlExterna)
                                         .textFieldStyle(.roundedBorder)
-                                        .keyboardType(.URL)
-                                        .textInputAutocapitalization(.never)
+                                        .iosKeyboardURL()
                                 }
                                 .padding(.top, 5)
                             }
@@ -192,7 +228,7 @@ struct ContentView: View {
                                     .padding()
                                     .background(isCurrentlyDark ? Color(white: 0.15) : Color.white)
                                     .cornerRadius(12)
-                                    .textInputAutocapitalization(.never)
+                                    .iosDisableAutocap()
                                 
                                 SecureField("Contraseña", text: $password)
                                     .textFieldStyle(.plain)
@@ -226,6 +262,7 @@ struct ContentView: View {
                                 .shadow(color: .blue.opacity(0.4), radius: 5, x: 0, y: 3)
                             }
                             .disabled(isLoadingLogin)
+                            .buttonStyle(.plain)
                         }
                         Spacer()
                     }
@@ -276,17 +313,35 @@ struct NubeView: View {
     var carpetas: [FBItem] { archivos.filter { $0.isDir } }
     var documentos: [FBItem] { archivos.filter { !$0.isDir } }
     
-    // Nombre formateado para el título superior
     var currentTitle: String {
         localPath == "/" ? "Home" : URL(fileURLWithPath: localPath).lastPathComponent
     }
     
+    // Utilidad para separar comportamiento de iPhone de manera estricta
+    private var isPhone: Bool {
+        #if os(iOS)
+        return UIDevice.current.userInterfaceIdiom == .phone
+        #else
+        return false
+        #endif
+    }
+    
+    // MARK: - Lógica de Navegación Animada Corregida
     func navegarACarpeta(path: String) {
-        withAnimation(.easeInOut(duration: 0.3)) {
-            self.archivos = []
-            self.estaCargando = true
+        if isPhone {
+            // En iPhone evitamos la animación de redibujado de lista para una transición pulcra cruzada
             self.localPath = path
+            self.estaCargando = true
+            self.archivos = []
             self.itemsSeleccionados.removeAll()
+        } else {
+            // En iPad y Mac mantenemos el resorte/animación original intacto
+            withAnimation(.easeInOut(duration: 0.3)) {
+                self.localPath = path
+                self.estaCargando = true
+                self.archivos = []
+                self.itemsSeleccionados.removeAll()
+            }
         }
         Task { await cargarArchivos() }
     }
@@ -296,11 +351,18 @@ struct NubeView: View {
         if newPath.isEmpty || newPath == "." { newPath = "/" }
         if !newPath.hasSuffix("/") { newPath += "/" }
         
-        withAnimation(.easeInOut(duration: 0.3)) {
-            self.archivos = []
-            self.estaCargando = true
+        if isPhone {
             self.localPath = newPath
+            self.estaCargando = true
+            self.archivos = []
             self.itemsSeleccionados.removeAll()
+        } else {
+            withAnimation(.easeInOut(duration: 0.3)) {
+                self.localPath = newPath
+                self.estaCargando = true
+                self.archivos = []
+                self.itemsSeleccionados.removeAll()
+            }
         }
         Task { await cargarArchivos() }
     }
@@ -318,15 +380,29 @@ struct NubeView: View {
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
                 let respuesta = try JSONDecoder().decode(FilebrowserResponse.self, from: data)
                 await MainActor.run {
-                    withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
+                    if isPhone {
+                        // FIX IPHONE: Asignamos datos SIN envolverlos en animación para prevenir el "zoom" central de la grilla
                         self.archivos = respuesta.items ?? []
                         self.archivos.sort { $0.name.lowercased() < $1.name.lowercased() }
-                        self.estaCargando = false
+                        
+                        // Animamos SÓLO el cruce de opacidad de "Cargando" -> "Mostrando Grilla"
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            self.estaCargando = false
+                        }
+                    } else {
+                        // En iPad/Mac entra con el spring original intacto
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.9)) {
+                            self.archivos = respuesta.items ?? []
+                            self.archivos.sort { $0.name.lowercased() < $1.name.lowercased() }
+                            self.estaCargando = false
+                        }
                     }
                 }
+            } else {
+                await MainActor.run { withAnimation { self.estaCargando = false } }
             }
         } catch {
-            await MainActor.run { self.estaCargando = false }
+            await MainActor.run { withAnimation { self.estaCargando = false } }
         }
     }
     
@@ -427,6 +503,31 @@ struct NubeView: View {
         } catch { await MainActor.run { self.isProcessing = false } }
     }
     
+    func borrarSeleccion() async {
+        guard !itemsSeleccionados.isEmpty else { return }
+        await MainActor.run {
+            self.isProcessing = true
+            self.estadoOperacion = "Eliminando..."
+        }
+        
+        for path in itemsSeleccionados {
+            let rutaSegura = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+            guard let url = URL(string: "\(baseURL)/api/resources\(rutaSegura)") else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = "DELETE"
+            request.setValue(token, forHTTPHeaderField: "X-Auth")
+            do { _ = try await URLSession.shared.data(for: request) } catch {}
+        }
+        
+        await MainActor.run {
+            self.isProcessing = false
+            self.estadoOperacion = ""
+            self.modoSeleccionActive = false
+            self.itemsSeleccionados.removeAll()
+        }
+        await cargarArchivos()
+    }
+    
     var body: some View {
         GeometryReader { geometry in
             let isWideScreen = geometry.size.width > 600
@@ -437,19 +538,15 @@ struct NubeView: View {
                     .animation(.easeInOut(duration: 0.6), value: isDark)
                 
                 if isWideScreen {
-                    // MODO DOBLE PANEL (iPad / Pantallas Grandes)
+                    // MODO DOBLE PANEL (iPad / Mac)
                     HStack(spacing: 0) {
                         VStack(alignment: .leading, spacing: 0) {
                             if localPath != "/" {
                                 Button(action: retrocederCarpeta) {
-                                    HStack {
-                                        Image(systemName: "chevron.left")
-                                        Text("Volver")
-                                    }
-                                    .font(.headline)
-                                    .foregroundColor(.red)
-                                    .padding()
+                                    HStack { Image(systemName: "chevron.left"); Text("Volver") }
+                                        .font(.headline).foregroundColor(.red).padding()
                                 }
+                                .buttonStyle(.plain)
                                 Divider()
                             }
                             
@@ -458,17 +555,13 @@ struct NubeView: View {
                                     Text(localPath == "/" ? "Carpetas Principales" : "Subcarpetas")
                                         .font(.title3.bold())
                                         .foregroundColor(isDark ? .white : .black)
-                                        .padding(.horizontal)
-                                        .padding(.top, 15)
+                                        .padding(.horizontal).padding(.top, 15)
                                     
                                     if estaCargando {
                                         ProgressView().padding()
                                     } else if carpetas.isEmpty {
                                         Text("No hay subcarpetas.")
-                                            .foregroundColor(.gray)
-                                            .padding()
-                                            .lineLimit(1)
-                                            .fixedSize(horizontal: true, vertical: false)
+                                            .foregroundColor(.gray).padding().lineLimit(1).fixedSize()
                                     } else {
                                         ForEach(carpetas) { carpeta in
                                             FolderRowView(
@@ -477,21 +570,16 @@ struct NubeView: View {
                                                 isSelectionMode: modoSeleccionActive,
                                                 isDark: isDark
                                             ) {
-                                                if modoSeleccionActive {
-                                                    toggleSeleccion(path: carpeta.path)
-                                                } else {
-                                                    navegarACarpeta(path: carpeta.path)
-                                                }
+                                                if modoSeleccionActive { toggleSeleccion(path: carpeta.path) }
+                                                else { navegarACarpeta(path: carpeta.path) }
                                             }
-                                        }
-                                        .padding(.horizontal)
+                                        }.padding(.horizontal)
                                     }
                                 }
                             }
                         }
                         .frame(width: geometry.size.width * 0.26)
                         .background(isDark ? Color(white: 0.12) : Color.white)
-                        .animation(.easeInOut(duration: 0.6), value: isDark)
                         
                         Divider().background(isDark ? Color.gray.opacity(0.3) : Color.gray.opacity(0.2))
                         
@@ -499,9 +587,7 @@ struct NubeView: View {
                             Picker("Vista", selection: $agruparPorTipo) {
                                 Text("General").tag(false)
                                 Text("Por Tipo").tag(true)
-                            }
-                            .pickerStyle(.segmented)
-                            .padding()
+                            }.pickerStyle(.segmented).padding()
                             
                             ScrollView {
                                 VStack(alignment: .leading, spacing: 20) {
@@ -515,17 +601,14 @@ struct NubeView: View {
                                             ForEach(grouped.keys.sorted(), id: \.self) { key in
                                                 VStack(alignment: .leading) {
                                                     Text(key.isEmpty ? "Otros" : key.uppercased())
-                                                        .font(.title3.bold())
-                                                        .foregroundColor(isDark ? .white : .black)
-                                                        .padding(.horizontal)
+                                                        .font(.title3.bold()).foregroundColor(isDark ? .white : .black).padding(.horizontal)
                                                     
                                                     LazyVGrid(columns: columnasGrid, spacing: 16) {
                                                         ForEach(grouped[key]!) { doc in
                                                             ItemCardView(archivo: doc, isSelected: itemsSeleccionados.contains(doc.path), isSelectionMode: modoSeleccionActive, baseURL: baseURL, token: token, isDark: isDark)
                                                                 .onTapGesture { manejarToqueArchivo(doc.path) }
                                                         }
-                                                    }
-                                                    .padding(.horizontal)
+                                                    }.padding(.horizontal)
                                                 }
                                             }
                                         } else {
@@ -534,8 +617,7 @@ struct NubeView: View {
                                                     ItemCardView(archivo: doc, isSelected: itemsSeleccionados.contains(doc.path), isSelectionMode: modoSeleccionActive, baseURL: baseURL, token: token, isDark: isDark)
                                                         .onTapGesture { manejarToqueArchivo(doc.path) }
                                                 }
-                                            }
-                                            .padding(.horizontal)
+                                            }.padding(.horizontal)
                                         }
                                     }
                                     Spacer().frame(height: 80)
@@ -545,64 +627,50 @@ struct NubeView: View {
                         .frame(width: geometry.size.width * 0.74)
                     }
                 } else {
-                    // MODO MÓVIL (Todo apilado)
+                    // MODO MÓVIL (iPhone) - COMPLETAMENTE LIMPIO
                     VStack(alignment: .leading, spacing: 0) {
-                        // Header Fijo para Móvil (Botón Volver + Título)
                         if localPath != "/" {
                             VStack(alignment: .leading, spacing: 5) {
                                 Button(action: retrocederCarpeta) {
                                     HStack { Image(systemName: "chevron.left"); Text("Volver") }
                                         .font(.headline).foregroundColor(.red)
                                 }
-                                .padding(.horizontal)
-                                .padding(.top, 10)
+                                .buttonStyle(.plain)
+                                .padding(.horizontal).padding(.top, 10)
                                 
                                 Text(currentTitle)
                                     .font(.title.bold())
                                     .foregroundColor(isDark ? .white : .black)
-                                    .padding(.horizontal)
-                                    .padding(.bottom, 10)
+                                    .padding(.horizontal).padding(.bottom, 10)
                             }
                             .background((isDark ? Color(white: 0.08) : Color(red: 0.96, green: 0.96, blue: 0.98)).ignoresSafeArea(edges: .top))
                         }
                         
                         ScrollView {
                             VStack(alignment: .leading, spacing: 20) {
-                                // Vista vacía global
-                                if !estaCargando && archivos.isEmpty {
+                                if estaCargando {
+                                    // FIX IPHONE: Añadido ProgressView para que realice el cruce de opacidad perfecto
+                                    HStack { Spacer(); ProgressView().scaleEffect(1.2); Spacer() }
+                                        .padding(.top, 50)
+                                } else if archivos.isEmpty {
                                     VStack(spacing: 15) {
                                         Spacer().frame(height: 50)
-                                        Image(systemName: "folder.badge.plus")
-                                            .font(.system(size: 70))
-                                            .foregroundColor(.blue.opacity(0.6))
-                                        Text("Esta carpeta está vacía")
-                                            .font(.headline)
-                                            .foregroundColor(.gray)
+                                        Image(systemName: "folder.badge.plus").font(.system(size: 70)).foregroundColor(.blue.opacity(0.6))
+                                        Text("Esta carpeta está vacía").font(.headline).foregroundColor(.gray)
                                         Text("Puedes subir archivos o crear una carpeta en el botón '+'.")
-                                            .font(.subheadline)
-                                            .foregroundColor(.gray.opacity(0.8))
-                                            .multilineTextAlignment(.center)
-                                            .padding(.horizontal)
-                                    }
-                                    .frame(maxWidth: .infinity)
+                                            .font(.subheadline).foregroundColor(.gray.opacity(0.8)).multilineTextAlignment(.center).padding(.horizontal)
+                                    }.frame(maxWidth: .infinity)
                                 } else {
                                     if !documentos.isEmpty || !carpetas.isEmpty {
                                         Picker("Vista", selection: $agruparPorTipo) {
                                             Text("General").tag(false)
                                             Text("Por Tipo").tag(true)
-                                        }
-                                        .pickerStyle(.segmented)
-                                        .padding(.horizontal)
-                                        .padding(.top, localPath == "/" ? 15 : 0)
+                                        }.pickerStyle(.segmented).padding(.horizontal).padding(.top, localPath == "/" ? 15 : 0)
                                     }
                                     
                                     if !carpetas.isEmpty {
                                         VStack(alignment: .leading) {
-                                            Text("Carpetas")
-                                                .font(.title3.bold())
-                                                .foregroundColor(isDark ? .white : .black)
-                                                .padding(.horizontal)
-                                            
+                                            Text("Carpetas").font(.title3.bold()).foregroundColor(isDark ? .white : .black).padding(.horizontal)
                                             LazyVGrid(columns: columnasGrid, spacing: 16) {
                                                 ForEach(carpetas) { carpeta in
                                                     ItemCardView(archivo: carpeta, isSelected: itemsSeleccionados.contains(carpeta.path), isSelectionMode: modoSeleccionActive, baseURL: baseURL, token: token, isDark: isDark)
@@ -611,8 +679,7 @@ struct NubeView: View {
                                                             else { navegarACarpeta(path: carpeta.path) }
                                                         }
                                                 }
-                                            }
-                                            .padding(.horizontal)
+                                            }.padding(.horizontal)
                                         }
                                     }
                                     
@@ -622,9 +689,7 @@ struct NubeView: View {
                                             ForEach(grouped.keys.sorted(), id: \.self) { key in
                                                 VStack(alignment: .leading) {
                                                     Text(key.isEmpty ? "Otros" : key.uppercased())
-                                                        .font(.title3.bold())
-                                                        .foregroundColor(isDark ? .white : .black)
-                                                        .padding(.horizontal)
+                                                        .font(.title3.bold()).foregroundColor(isDark ? .white : .black).padding(.horizontal)
                                                     
                                                     LazyVGrid(columns: columnasGrid, spacing: 16) {
                                                         ForEach(grouped[key]!) { doc in
@@ -648,13 +713,17 @@ struct NubeView: View {
                             }
                             .padding(.vertical)
                         }
+                        .id("mobile-\(localPath)")
                     }
                 }
                 
-                // Overlays y descargas...
                 if isProcessing {
                     ZStack {
-                        Color(UIColor.systemBackground).opacity(0.8).ignoresSafeArea()
+                        #if os(macOS)
+                        Color(nsColor: .windowBackgroundColor).opacity(0.8).ignoresSafeArea()
+                        #else
+                        Color(uiColor: .systemBackground).opacity(0.8).ignoresSafeArea()
+                        #endif
                         VStack(spacing: 20) {
                             ProgressView().scaleEffect(1.5).tint(.blue)
                             Text(estadoOperacion).font(.headline).foregroundColor(.primary)
@@ -665,24 +734,36 @@ struct NubeView: View {
                 }
                 
                 if modoSeleccionActive && !itemsSeleccionados.isEmpty {
-                    VStack {
+                    VStack(spacing: 12) {
                         Spacer()
+                        
                         Button(action: { Task { await descargarSeleccion() } }) {
                             HStack {
                                 Image(systemName: "square.and.arrow.down")
                                 Text("Descargar (\(itemsSeleccionados.count))")
                             }
-                            .font(.headline).foregroundColor(.white).frame(maxWidth: .infinity).padding()
-                            .background(Color.blue).cornerRadius(16).padding(.horizontal, 25).padding(.bottom, 20)
-                            .shadow(color: .blue.opacity(0.4), radius: 10, x: 0, y: 5)
+                            .font(.headline).foregroundColor(.white).frame(maxWidth: .infinity)
+                            .padding().background(Color.blue).cornerRadius(16).shadow(color: .blue.opacity(0.4), radius: 10, x: 0, y: 5)
                         }
+                        .buttonStyle(.plain)
+                        
+                        Button(action: { Task { await borrarSeleccion() } }) {
+                            HStack {
+                                Image(systemName: "trash")
+                                Text("Borrar (\(itemsSeleccionados.count))")
+                            }
+                            .font(.headline).foregroundColor(.white).frame(maxWidth: .infinity)
+                            .padding().background(Color.red).cornerRadius(16).shadow(color: .red.opacity(0.4), radius: 10, x: 0, y: 5)
+                        }
+                        .buttonStyle(.plain)
                     }
+                    .padding(.horizontal, 25).padding(.bottom, 20)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
-            // En móvil, si no estamos en home, ocultamos el navigationTitle nativo porque usamos el custom
             .navigationTitle(localPath == "/" ? "Home" : (isWideScreen ? currentTitle : ""))
             .toolbar {
+                #if os(iOS)
                 ToolbarItem(placement: .navigationBarLeading) {
                     if !modoSeleccionActive {
                         Button(action: alCerrarSesion) { Image(systemName: "rectangle.portrait.and.arrow.right").foregroundColor(.red) }
@@ -698,11 +779,29 @@ struct NubeView: View {
                         Menu {
                             Button(action: { mostrarSelectorArchivos = true }) { Label("Subir Archivo", systemImage: "doc.badge.plus") }
                             Button(action: { mostrarAlertaCarpeta = true }) { Label("Nueva Carpeta", systemImage: "folder.badge.plus") }
-                        } label: {
-                            Image(systemName: "plus.circle.fill").font(.title3)
-                        }
+                        } label: { Image(systemName: "plus.circle.fill").font(.title3) }
                     }
                 }
+                #else
+                ToolbarItem(placement: .navigation) {
+                    if !modoSeleccionActive {
+                        Button(action: alCerrarSesion) { Image(systemName: "rectangle.portrait.and.arrow.right").foregroundColor(.red) }
+                    }
+                }
+                ToolbarItemGroup(placement: .primaryAction) {
+                    if !archivos.isEmpty {
+                        Button(action: {
+                            withAnimation { modoSeleccionActive.toggle(); itemsSeleccionados.removeAll() }
+                        }) { Text(modoSeleccionActive ? "Cancelar" : "Seleccionar").fontWeight(.medium) }
+                    }
+                    if !modoSeleccionActive {
+                        Menu {
+                            Button(action: { mostrarSelectorArchivos = true }) { Label("Subir Archivo", systemImage: "doc.badge.plus") }
+                            Button(action: { mostrarAlertaCarpeta = true }) { Label("Nueva Carpeta", systemImage: "folder.badge.plus") }
+                        } label: { Image(systemName: "plus.circle.fill").font(.title3) }
+                    }
+                }
+                #endif
             }
             .alert("Nueva Carpeta", isPresented: $mostrarAlertaCarpeta) {
                 TextField("Nombre de la carpeta", text: $nombreNuevaCarpeta)
@@ -723,12 +822,8 @@ struct NubeView: View {
     }
     
     private func manejarToqueArchivo(_ path: String) {
-        if modoSeleccionActive {
-            toggleSeleccion(path: path)
-        } else {
-            itemsSeleccionados.insert(path)
-            Task { await descargarSeleccion() }
-        }
+        if modoSeleccionActive { toggleSeleccion(path: path) }
+        else { itemsSeleccionados.insert(path); Task { await descargarSeleccion() } }
     }
     
     private func toggleSeleccion(path: String) {
@@ -864,7 +959,7 @@ struct ItemCardView: View {
     }
 }
 
-// MARK: - Image Loader
+// MARK: - Image Loader Multiplataforma
 struct AuthImageView: View {
     let path: String
     let baseURL: String
@@ -872,18 +967,27 @@ struct AuthImageView: View {
     let fallbackIcon: String
     let fallbackColor: Color
     
-    @State private var image: UIImage?
+    @State private var image: PlatformImage?
     @State private var failed = false
     
     var body: some View {
         Group {
             if let image = image {
+                #if os(macOS)
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(height: 55)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .shadow(color: .black.opacity(0.1), radius: 3)
+                #else
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
                     .frame(height: 55)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .shadow(color: .black.opacity(0.1), radius: 3)
+                #endif
             } else if failed {
                 Image(systemName: fallbackIcon)
                     .resizable()
@@ -908,8 +1012,8 @@ struct AuthImageView: View {
         
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
-            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200, let uiImage = UIImage(data: data) {
-                await MainActor.run { self.image = uiImage }
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200, let platformImage = PlatformImage(data: data) {
+                await MainActor.run { self.image = platformImage }
             } else {
                 await MainActor.run { self.failed = true }
             }
